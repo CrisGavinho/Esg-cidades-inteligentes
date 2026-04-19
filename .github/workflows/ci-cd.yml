@@ -1,0 +1,184 @@
+name: CI/CD Pipeline - Cidades ESG Inteligentes
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+
+env:
+  DOCKER_IMAGE: ghcr.io/${{ github.repository_owner }}/esg-cidades-inteligentes
+  JAVA_VERSION: "21"
+
+jobs:
+  # ============================================================
+  # JOB 1: Build e Testes
+  # ============================================================
+  build-and-test:
+    name: Build & Testes Automatizados
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven
+
+      - name: Executar Build e Testes
+        run: mvn clean verify -B
+        working-directory: .
+
+      - name: Publicar Relatório de Testes
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: target/surefire-reports/
+
+      - name: Verificar cobertura de testes
+        run: mvn jacoco:report -B
+        continue-on-error: true
+
+  # ============================================================
+  # JOB 2: Build da Imagem Docker
+  # ============================================================
+  docker-build:
+    name: Build da Imagem Docker
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    if: github.event_name == 'push'
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-version: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Login no GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extrair metadados da imagem
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_IMAGE }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build e Push da imagem Docker
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================
+  # JOB 3: Deploy - Staging (branch develop)
+  # ============================================================
+  deploy-staging:
+    name: Deploy - Ambiente Staging
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: http://staging.esg-cidades.com.br
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Deploy no servidor Staging via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            cd /opt/esg-cidades
+            export IMAGE_TAG=develop
+            export DOCKER_IMAGE=${{ env.DOCKER_IMAGE }}
+            export DB_PASSWORD=${{ secrets.STAGING_DB_PASSWORD }}
+            export DB_NAME=esg_staging
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker compose --profile staging pull
+            docker compose --profile staging up -d --remove-orphans
+            docker image prune -f
+
+      - name: Health Check - Staging
+        run: |
+          echo "Aguardando aplicação iniciar..."
+          sleep 30
+          curl --fail --retry 5 --retry-delay 10 \
+            http://${{ secrets.STAGING_HOST }}:8080/actuator/health \
+            || (echo "Health check falhou!" && exit 1)
+
+      - name: Notificar Deploy Staging
+        if: always()
+        run: |
+          echo "✅ Deploy Staging concluído - Tag: develop"
+
+  # ============================================================
+  # JOB 4: Deploy - Produção (branch main)
+  # ============================================================
+  deploy-production:
+    name: Deploy - Ambiente Produção
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: http://esg-cidades.com.br
+
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Deploy no servidor Produção via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          script: |
+            cd /opt/esg-cidades
+            export IMAGE_TAG=latest
+            export DOCKER_IMAGE=${{ env.DOCKER_IMAGE }}
+            export DB_PASSWORD_PROD=${{ secrets.PROD_DB_PASSWORD }}
+            export DB_NAME_PROD=esg_prod
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            docker compose --profile prod pull
+            docker compose --profile prod up -d --remove-orphans
+            docker image prune -f
+
+      - name: Health Check - Produção
+        run: |
+          echo "Aguardando aplicação iniciar..."
+          sleep 30
+          curl --fail --retry 5 --retry-delay 10 \
+            http://${{ secrets.PROD_HOST }}:8081/actuator/health \
+            || (echo "Health check falhou!" && exit 1)
+
+      - name: Notificar Deploy Produção
+        if: always()
+        run: |
+          echo "🚀 Deploy Produção concluído - Tag: latest"
