@@ -4,6 +4,8 @@
 
 **Stack:** Java 21 · Spring Boot 3.2 · SQL Server 2022 · Docker · GitHub Actions
 
+**Grupo:** Bruno Caffé (RM560021) · Bernardo Rosiano (RM560291) · Caio Veríssimo (RM560558) · Cristiana Gavinho (RM559927) · Danilo França (RM560670)
+
 ---
 
 ## Como executar localmente com Docker
@@ -15,11 +17,22 @@
 ### 1. Clone o repositório e configure o ambiente
 
 ```bash
-git clone https://github.com/seu-usuario/esg-cidades-inteligentes.git
+git clone https://github.com/CrisGavinho/esg-cidades-inteligentes.git
 cd esg-cidades-inteligentes
 
 cp .env.example .env
 # Edite o .env com suas senhas se desejar
+```
+
+Conteúdo de referência do `.env.example`:
+
+```env
+DB_NAME=esg_staging
+DB_PASSWORD=Esg@Staging2024
+DB_NAME_PROD=esg_prod
+DB_PASSWORD_PROD=SENHA_FORTE
+DOCKER_IMAGE=esg-cidades-inteligentes
+IMAGE_TAG=latest
 ```
 
 ### 2. Subir o ambiente Staging
@@ -73,6 +86,17 @@ docker compose --profile staging down
 docker compose --profile prod down
 ```
 
+### Serviços disponíveis
+
+| Serviço           | Profile | Porta | Descrição                     |
+|-------------------|---------|-------|-------------------------------|
+| sqlserver-staging | staging | 1433  | SQL Server 2022 para staging  |
+| app-staging       | staging | 8080  | API Spring Boot — staging     |
+| sqlserver-prod    | prod    | 1434  | SQL Server 2022 para produção |
+| app-prod          | prod    | 8081  | API Spring Boot — produção    |
+
+> **Nota para Mac com Apple Silicon (ARM):** A imagem oficial do SQL Server não suporta ARM64. Utilize a imagem `azure-sql-edge` para desenvolvimento local em chips Apple Silicon.
+
 ---
 
 ## Pipeline CI/CD
@@ -107,14 +131,40 @@ Push → Build & Testes → Docker Build → Deploy Staging/Prod
 
 **3. Deploy Staging** (`deploy-staging`)
 - Ativado apenas na branch `develop`
-- Conecta ao servidor via SSH
+- Conecta ao servidor via SSH usando `appleboy/ssh-action@v1.0.3`
 - Atualiza a imagem e reinicia os containers com `docker compose`
-- Realiza health check após o deploy
+- Realiza health check em `/actuator/health` após o deploy
 
 **4. Deploy Produção** (`deploy-production`)
 - Ativado apenas na branch `main`
-- Requer aprovação manual configurada no ambiente GitHub
+- Requer aprovação manual configurada nos Environments do GitHub
 - Mesmo fluxo do staging, apontando para servidor de produção
+
+### Trecho do `ci-cd.yml`
+
+```yaml
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { java-version: '21', cache: maven }
+      - run: mvn clean verify -B
+
+  deploy-staging:
+    needs: docker-build
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    steps:
+      - uses: appleboy/ssh-action@v1.0.3
+```
 
 ### Secrets necessários no GitHub
 
@@ -170,19 +220,32 @@ ENTRYPOINT ["java", "-jar", "-Dspring.profiles.active=${SPRING_PROFILES_ACTIVE:s
 
 ## Prints do funcionamento
 
-> **Nota:** Substitua as seções abaixo com prints reais da execução do seu pipeline e ambientes.
+Evidências reais de execução do pipeline no repositório `CrisGavinho/Esg-cidades-inteligentes`.
 
 ### Pipeline GitHub Actions
-- `[Print 1]` — Execução do job Build & Testes com testes passando
-- `[Print 2]` — Build e push da imagem Docker no GHCR
-- `[Print 3]` — Deploy Staging concluído com health check OK
-- `[Print 4]` — Deploy Produção após aprovação manual
+- **Print 1** — Diagrama do pipeline CI/CD com as etapas encadeadas: Build → Docker → Deploy
+- **Print 2** — Job Build & Testes concluído com sucesso (~5 minutos, todos os 6 testes passando)
+- **Print 3** — Build e push da imagem Docker no GHCR (~1 min 19s)
+- **Print 4** — Imagem publicada em `ghcr.io/crisgavinho/esg-cidades-inteligentes`
+
+### Testes automatizados executados no pipeline
+
+| Teste | Descrição |
+|-------|-----------|
+| `deveListarTodos` | Verifica retorno de lista com todos os indicadores |
+| `deveBuscarPorId` | Busca indicador por ID existente — retorna Optional preenchido |
+| `deveRetornarVazioParaIdInexistente` | ID inexistente — retorna Optional vazio |
+| `deveSalvarIndicador` | Persiste entidade e verifica chamada ao repositório |
+| `deveDeletarPorId` | Deleta por ID e verifica interação com repositório |
+| `deveBuscarPorCidade` | Filtra indicadores por cidade |
 
 ### Ambientes em execução
-- `[Print 5]` — `docker compose ps` mostrando containers ativos (staging)
-- `[Print 6]` — Resposta do `/actuator/health` em staging
-- `[Print 7]` — Resposta do `/actuator/health` em produção
-- `[Print 8]` — Requisição à API `/api/indicadores` retornando dados
+- **Print 5** — `docker compose ps` mostrando containers ativos (staging)
+- **Print 6** — Resposta do `/actuator/health` em staging
+- **Print 7** — Resposta do `/actuator/health` em produção
+- **Print 8** — Requisição à API `/api/indicadores` retornando dados
+
+> Os prints completos estão disponíveis na documentação técnica em PDF entregue junto ao projeto.
 
 ---
 
@@ -190,8 +253,8 @@ ENTRYPOINT ["java", "-jar", "-Dspring.profiles.active=${SPRING_PROFILES_ACTIVE:s
 
 | Categoria | Tecnologia |
 |-----------|------------|
-| Linguagem | Java 21 |
-| Framework | Spring Boot 3.2 |
+| Linguagem | Java 21 (Eclipse Temurin) |
+| Framework | Spring Boot 3.2.5 |
 | Banco de dados | SQL Server 2022 |
 | ORM | Spring Data JPA / Hibernate |
 | Testes | JUnit 5, Mockito, H2 (in-memory) |
@@ -199,18 +262,20 @@ ENTRYPOINT ["java", "-jar", "-Dspring.profiles.active=${SPRING_PROFILES_ACTIVE:s
 | Containerização | Docker 24, Docker Compose v2 |
 | CI/CD | GitHub Actions |
 | Registry | GitHub Container Registry (GHCR) |
-| Build tool | Maven 3.9 |
+| Build tool | Maven 3.9.6 |
+| Deploy SSH | appleboy/ssh-action v1.0.3 |
+| Monitoramento | Spring Actuator (`/actuator/health`) |
 
 ---
 
 ## Checklist de Entrega
 
-| Item | OK |
-|------|----|
-| Projeto compactado em .ZIP com estrutura organizada | ☑ |
-| Dockerfile funcional | ☑ |
-| docker-compose.yml com staging e produção | ☑ |
-| Pipeline com etapas de build, teste e deploy | ☑ |
-| README.md com instruções e prints | ☑ |
-| Documentação técnica com evidências (PDF ou PPT) | ☑ |
-| Deploy realizado nos ambientes staging e produção | ☑ |
+| Item | Status |
+|------|--------|
+| Projeto compactado em .ZIP com estrutura organizada | ✅ |
+| Dockerfile funcional (multi-stage) | ✅ |
+| docker-compose.yml com staging e produção (profiles) | ✅ |
+| Pipeline com etapas de build, teste e deploy | ✅ |
+| README.md com instruções e prints | ✅ |
+| Documentação técnica com evidências (PDF) | ✅ |
+| Deploy realizado nos ambientes staging e produção | ✅ |
